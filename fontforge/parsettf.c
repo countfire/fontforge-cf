@@ -3323,10 +3323,19 @@ return( NULL );
 	}
 	dicts[i] = readcfftopdict(ttf,fontnames!=NULL?fontnames[i]:NULL,
 		offsets[i+1]-offsets[i], info);
+
+        if (parent_dict==NULL)
+          LogError("CHECK: ParentFont: %i FontMatrix: [%f, %f, %f, %f]", dicts[i]->fontmatrix_set,
+              dicts[i]->fontmatrix[0], dicts[i]->fontmatrix[1], dicts[i]->fontmatrix[2], dicts[i]->fontmatrix[3]
+          );
+        else
+          LogError("CHECK: SubFont: %i FontMatrix: [%f, %f, %f, %f]", dicts[i]->fontmatrix_set,
+              dicts[i]->fontmatrix[0], dicts[i]->fontmatrix[1], dicts[i]->fontmatrix[2], dicts[i]->fontmatrix[3]
+          );
+
 	if (    parent_dict!=NULL
-	     && parent_dict->fontmatrix_set
-	     && dicts[i]->synthetic_base!=-1 ) {
-	    if ( dicts[i]->fontmatrix_set )
+	     && parent_dict->fontmatrix_set ) {
+	    if ( dicts[i]->synthetic_base!=-1 && dicts[i]->fontmatrix_set )
 		MatMultiply(parent_dict->fontmatrix,dicts[i]->fontmatrix,dicts[i]->fontmatrix);
 	    else
 		memcpy(dicts[i]->fontmatrix,parent_dict->fontmatrix,6*sizeof(real));
@@ -6297,6 +6306,7 @@ static SplineFont *SFFillFromTTF(struct ttfinfo *info) {
 	    (info->bad_ot		?lvs_bad_ot_table:0) |
 	    (info->bad_os2_version	?lvs_bad_os2_version:0)|
 	    (info->bad_sfnt_header	?lvs_bad_sfnt_header:0);
+
 return( sf );
 }
 

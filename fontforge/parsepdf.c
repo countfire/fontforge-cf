@@ -1269,7 +1269,7 @@ static void freestuff(struct psstack *stack, int sp) {
     }
 }
 
-static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec) {
+static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec, real mtx[4]) {
     SplinePointList *cur=NULL, *head=NULL;
     BasePoint current;
     int tok, i, j;
@@ -1297,8 +1297,11 @@ static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec) {
     locale_t tmplocale; locale_t oldlocale; // Declare temporary locale storage.
     switch_to_c_locale(&tmplocale, &oldlocale); // Switch to the C locale temporarily and cache the old locale.
 
-    transform[0] = transform[3] = 1.0;
-    transform[1] = transform[2] = transform[4] = transform[5] = 0;
+    transform[0] = mtx[0];
+    transform[1] = mtx[1];
+    transform[2] = mtx[2];
+    transform[3] = mtx[3];
+    transform[4] = transform[5] = 0;
     current.x = current.y = 0;
     dashes[0] = 0; dashes[1] = DASH_INHERITED;
 
@@ -1381,6 +1384,16 @@ static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec) {
 			dictfree(&stack[sp].u.dict);
 			MatMultiply(t,transform,transform);
 		    }
+		}
+		else if ( sp>=6 && stack[sp-1].type==ps_num && stack[sp-2].type==ps_num && stack[sp-3].type==ps_num
+		    && stack[sp-4].type==ps_num && stack[sp-5].type==ps_num && stack[sp-6].type==ps_num) {
+		    t[5] = stack[--sp].u.val;
+		    t[4] = stack[--sp].u.val;
+		    t[3] = stack[--sp].u.val;
+		    t[2] = stack[--sp].u.val;
+		    t[1] = stack[--sp].u.val;
+		    t[0] = stack[--sp].u.val;
+		    MatMultiply(t,transform,transform);
 		}
 	    }
 	  break;
@@ -1510,7 +1523,7 @@ static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec) {
 		temp1.x += stack[sp-2].u.val;
 		Transform(&temp2,&temp1,transform);
 		second = SplinePointCreate(temp2.x,temp2.y);
-		temp1.y += stack[sp-3].u.val;
+		temp1.y += stack[sp-1].u.val;
 		Transform(&temp2,&temp1,transform);
 		third = SplinePointCreate(temp2.x,temp2.y);
 		temp1.x = stack[sp-4].u.val;
@@ -1609,7 +1622,7 @@ static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec) {
 }
 
 static SplineChar *pdf_InterpretSC(struct pdfcontext *pc,char *glyphname,
-	char *objnum, int *flags) {
+	char *objnum, int *flags, real mtx[4]) {
     int gn = strtol(objnum,NULL,10);
     EntityChar ec;
     FILE *glyph_stream;
@@ -1629,7 +1642,7 @@ return( NULL );
     ec.sc = sc = SplineCharCreate(2);
     sc->name = copy(glyphname);
 
-    _InterpretPdf(glyph_stream,pc,&ec);
+    _InterpretPdf(glyph_stream,pc,&ec,mtx);
     sc->width = ec.width;
     sc->layer_cnt = 1;
     SCAppendEntityLayers(sc,ec.splines,ImportParamsState());
@@ -1674,7 +1687,7 @@ return( NULL );
     ec.sc = &dummy;
     dummy.name = "Nameless glyph";
 
-    _InterpretPdf(glyph_stream,pc,&ec);
+    _InterpretPdf(glyph_stream,pc,&ec,NULL);
 
     fclose(glyph_stream);
 return( ec.splines );
@@ -1746,7 +1759,7 @@ static void add_mapping(SplineFont *basesf, long *mappings, int *uvals, int nuni
     }
 }
 
-static void pdf_getcmap(struct pdfcontext *pc, SplineFont *basesf, int font_num) {
+static void pdf_getcmap(struct pdfcontext *pc, SplineFont *basesf, int font_num, int glyph_map[256]) {
     FILE *file;
     int i, j, gid, start, end, uni, cur=0, nuni, nhex, nchars, lo, *uvals;
     long *mappings = NULL;
@@ -1803,6 +1816,8 @@ return;
 		    }
 		    if (cur < mappings_length) {
 		        mappings[cur] = tmap;
+                        if (glyph_map != NULL)
+                          gid = glyph_map[gid];
 		        add_mapping(basesf, mappings, uvals, nuni, gid, pc->cmap_from_cid[font_num], cur);
 		        cur++;
 		    }
@@ -1831,6 +1846,8 @@ return;
 
 		    for (gid=start; gid<=end; gid++) {
 			mappings[cur] = uvals[0] = uni++;
+                        if (glyph_map != NULL)
+                          gid = glyph_map[gid];
 			add_mapping(basesf, mappings, uvals, 1, gid, pc->cmap_from_cid[font_num], cur);
 			cur++;
 		    }
@@ -1857,7 +1874,33 @@ return;
     LogError( _("Syntax errors while parsing ToUnicode CMap") );
 }
 
-static int pdf_getcharprocs(struct pdfcontext *pc,char *charprocs) {
+static int pdf_getdict(struct pdfcontext *pc,char *pt) {
+    int cp = strtol(pt,NULL,10);
+    FILE *temp, *pdf = pc->pdf;
+    int ret;
+
+    /* An indirect reference? */
+    if ( cp!=0 ) {
+	if ( !pdf_findobject(pc,cp) )
+return( false );
+return( pdf_readdict(pc));
+    }
+    temp = GFileTmpfile();
+    if ( temp==NULL )
+return( false );
+    while ( *pt ) {
+	putc(*pt,temp);
+	++pt;
+    }
+    rewind(temp);
+    pc->pdf = temp;
+    ret = pdf_readdict(pc);
+    pc->pdf = pdf;
+    fclose(temp);
+return( ret );
+}
+
+static int pdf_getencoding(struct pdfcontext *pc,char *charprocs) {
     int cp = strtol(charprocs,NULL,10);
     FILE *temp, *pdf = pc->pdf;
     int ret;
@@ -1883,34 +1926,66 @@ return( false );
 return( ret );
 }
 
-static SplineFont *pdf_loadtype3(struct pdfcontext *pc) {
-    char *enc, *cp, *fontmatrix, *name;
+static FILE *cf_str_to_stream(char *str) {
+    FILE *temp;
+    int ret;
+
+    temp = GFileTmpfile();
+    if ( temp==NULL )
+return( NULL );
+    while ( *str ) {
+	putc(*str,temp);
+	++str;
+    }
+    rewind(temp);
+return( temp );
+}
+
+
+static SplineFont *pdf_loadtype3(struct pdfcontext *pc, int font_num) {
+    char *enc, *cp, *fontmatrix, *name, *diffs;
     double emsize;
+    double mtx[4];
     SplineFont *sf;
     int flags = -1;
     int i;
     struct psdict *charprocdict;
+    struct psdict *fontdict;
+
+    fontdict = PSDictCopy(&pc->pdfdict);
 
     name=PSDictHasEntry(&pc->pdfdict,"Name");
     if ( name==NULL )
-	name=PSDictHasEntry(&pc->pdfdict,"BaseFont");
+        name=PSDictHasEntry(&pc->pdfdict,"BaseFont");
+    if ( name!=NULL )
+        name = copy(name+1);
     if ( (enc=PSDictHasEntry(&pc->pdfdict,"Encoding"))==NULL )
   goto fail;
     if ( (cp=PSDictHasEntry(&pc->pdfdict,"CharProcs"))==NULL )
   goto fail;
     if ( (fontmatrix=PSDictHasEntry(&pc->pdfdict,"FontMatrix"))==NULL )
   goto fail;
-    if ( sscanf(fontmatrix,"[%lg",&emsize)!=1 || emsize==0 )
+    if ( sscanf(fontmatrix,"[%lg %lg %lg %lg",&mtx[0],&mtx[1],&mtx[2],&mtx[3])!=4 || mtx[0]==0 )
   goto fail;
-    if ( !pdf_getcharprocs(pc,cp))
+    if ( !pdf_getdict(pc,cp))
   goto fail;
 
+    emsize = mtx[0];
+
     emsize = 1.0/emsize;
+    if (emsize < 1000) {
+      emsize = 1000;
+    }
+    mtx[0] = mtx[0]*emsize;
+    mtx[1] = mtx[1]*emsize;
+    mtx[2] = mtx[2]*emsize;
+    mtx[3] = mtx[3]*emsize;
+    LogError("FontMatrix: [%lg %lg %lg %lg]", mtx[0], mtx[1], mtx[2], mtx[3]);
+
     charprocdict = PSDictCopy(&pc->pdfdict);
 
     sf = SplineFontBlank(charprocdict->next);
     if ( name!=NULL ) {
-        name = copy(name+1);
 	free(sf->fontname); free(sf->fullname); free(sf->familyname);
 	sf->fontname = name;
 	sf->familyname = copy(name);
@@ -1924,7 +1999,7 @@ static SplineFont *pdf_loadtype3(struct pdfcontext *pc) {
 
     for ( i=0; i<charprocdict->next; ++i ) {
 	sf->glyphs[i] = pdf_InterpretSC(pc,charprocdict->keys[i],
-		charprocdict->values[i],&flags);
+		charprocdict->values[i],&flags,mtx);
 	if ( sf->glyphs[i]!=NULL ) {
 	    sf->glyphs[i]->orig_pos = i;
 	    sf->glyphs[i]->parent = sf;
@@ -1935,12 +2010,64 @@ static SplineFont *pdf_loadtype3(struct pdfcontext *pc) {
     sf->glyphcnt = charprocdict->next;
     PSDictFree(charprocdict);
 
+    // decode the diffs to figure out the unicode
+    int start;
+    int ch;
+    int glyph_map[256];
+    // hack identity mapping to start
+    for (int i = 0; i < 256; i++)
+      glyph_map[i] = i;
+    char *glyph_name;
+    struct psdict pdfdict = pc->pdfdict;
+    pc->pdfdict = *fontdict;
+    enc = PSDictHasEntry(&pc->pdfdict,"Encoding");
+    pdf_getencoding(pc, enc);
+    if ( (diffs=PSDictHasEntry(&pc->pdfdict,"Differences"))!=NULL ) {
+      FILE *pdf = pc->pdf;
+      FILE *fdiffs = cf_str_to_stream(diffs);
+
+      while ( (ch=getc(fdiffs))>=0 ) {
+        if (pdf_space(ch))
+          continue;
+        if (ch == '[')
+          continue;
+        if (ch == ']')
+          break;
+        if (ch == '/') {
+          ungetc(ch, fdiffs);
+          pc->pdf = fdiffs;
+          glyph_name = pdf_getname(pc);
+          pc->pdf = pdf;
+          // we want to store orig_pos for the glyphname here
+          for (int i = 0; i < sf->glyphmax; i++) {
+            if (strcmp(glyph_name, sf->glyphs[i]->name) == 0) {
+              glyph_map[start] = sf->glyphs[i]->orig_pos;
+              LogError("Mapping: %i -> %i %s", start, glyph_map[start], glyph_name);
+            }
+          }
+          start++;
+        }
+        else {
+          ungetc(ch, fdiffs);
+          fscanf(fdiffs,"%d",&start);
+        }
+      }
+
+    }
+    pc->pdfdict = pdfdict;
+
     /* I'm going to ignore the encoding vector for now, and just return original */
     sf->map = EncMapFromEncoding(sf,FindOrMakeEncoding("Original"));
+
+    if ( pc->cmapobjs[font_num] != -1 )
+      pdf_getcmap(pc, sf, font_num, glyph_map);
+
 
 return( sf );
 
   fail:
+    PSDictFree(fontdict);
+    free(name);
     LogError( _("Syntax errors while parsing Type3 font headers") );
 return( NULL );
 }
@@ -1962,15 +2089,18 @@ static SplineFont *pdf_loadfont(struct pdfcontext *pc,int font_num) {
     if ( !pdf_findobject(pc,pc->fontobjs[font_num]) || !pdf_readdict(pc) )
 return( NULL );
 
-    if ( (pt=PSDictHasEntry(&pc->pdfdict,"Subtype"))!=NULL && strcmp(pt,"/Type3")==0 )
-return( pdf_loadtype3(pc));
+    if ( (pt=PSDictHasEntry(&pc->pdfdict,"Subtype"))!=NULL && strcmp(pt,"/Type3")==0 ) {
+        sf = pdf_loadtype3(pc, font_num);
+        return( sf );
+    }
 
     if ( (pt=PSDictHasEntry(&pc->pdfdict,"FontDescriptor"))==NULL )
   goto fail;
-    fd = strtol(pt,NULL,10);
 
-    if ( !pdf_findobject(pc,fd) || !pdf_readdict(pc) )
-  goto fail;
+    if (!pdf_getdict(pc, pt)) {
+      LogError("Could not read descriptor");
+      goto fail;
+    }
 
     if ( (pt=PSDictHasEntry(&pc->pdfdict,"FontFile"))!=NULL )
 	type = 1;
@@ -2011,10 +2141,8 @@ return( NULL );
     fclose(file);
     if (sf == NULL)
 	goto fail;
-    /* Don't attempt to parse CMaps for Type 1 fonts: they already have glyph names */
-    /* which are usually more meaningful */
-    if (pc->cmapobjs[font_num] != -1 && type > 1)
-	pdf_getcmap(pc, sf, font_num);
+    if (pc->cmapobjs[font_num] != -1)
+	pdf_getcmap(pc, sf, font_num, NULL);
 return( sf );
 
   fail:
