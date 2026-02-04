@@ -1874,8 +1874,8 @@ return;
     LogError( _("Syntax errors while parsing ToUnicode CMap") );
 }
 
-static int pdf_getcharprocs(struct pdfcontext *pc,char *charprocs) {
-    int cp = strtol(charprocs,NULL,10);
+static int pdf_getdict(struct pdfcontext *pc,char *pt) {
+    int cp = strtol(pt,NULL,10);
     FILE *temp, *pdf = pc->pdf;
     int ret;
 
@@ -1888,9 +1888,9 @@ return( pdf_readdict(pc));
     temp = GFileTmpfile();
     if ( temp==NULL )
 return( false );
-    while ( *charprocs ) {
-	putc(*charprocs,temp);
-	++charprocs;
+    while ( *pt ) {
+	putc(*pt,temp);
+	++pt;
     }
     rewind(temp);
     pc->pdf = temp;
@@ -1967,7 +1967,7 @@ static SplineFont *pdf_loadtype3(struct pdfcontext *pc, int font_num) {
   goto fail;
     if ( sscanf(fontmatrix,"[%lg %lg %lg %lg",&mtx[0],&mtx[1],&mtx[2],&mtx[3])!=4 || mtx[0]==0 )
   goto fail;
-    if ( !pdf_getcharprocs(pc,cp))
+    if ( !pdf_getdict(pc,cp))
   goto fail;
 
     emsize = mtx[0];
@@ -2096,10 +2096,11 @@ return( NULL );
 
     if ( (pt=PSDictHasEntry(&pc->pdfdict,"FontDescriptor"))==NULL )
   goto fail;
-    fd = strtol(pt,NULL,10);
 
-    if ( !pdf_findobject(pc,fd) || !pdf_readdict(pc) )
-  goto fail;
+    if (!pdf_getdict(pc, pt)) {
+      LogError("Could not read descriptor");
+      goto fail;
+    }
 
     if ( (pt=PSDictHasEntry(&pc->pdfdict,"FontFile"))!=NULL )
 	type = 1;
