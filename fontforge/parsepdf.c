@@ -2140,9 +2140,7 @@ return( NULL );
     fclose(file);
     if (sf == NULL)
 	goto fail;
-    /* Don't attempt to parse CMaps for Type 1 fonts: they already have glyph names */
-    /* which are usually more meaningful */
-    if (pc->cmapobjs[font_num] != -1 && type > 1)
+    if (pc->cmapobjs[font_num] != -1)
 	pdf_getcmap(pc, sf, font_num, NULL);
 return( sf );
 
