@@ -1269,7 +1269,7 @@ static void freestuff(struct psstack *stack, int sp) {
     }
 }
 
-static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec) {
+static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec, real mtx[4]) {
     SplinePointList *cur=NULL, *head=NULL;
     BasePoint current;
     int tok, i, j;
@@ -1297,8 +1297,11 @@ static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec) {
     locale_t tmplocale; locale_t oldlocale; // Declare temporary locale storage.
     switch_to_c_locale(&tmplocale, &oldlocale); // Switch to the C locale temporarily and cache the old locale.
 
-    transform[0] = transform[3] = 1.0;
-    transform[1] = transform[2] = transform[4] = transform[5] = 0;
+    transform[0] = mtx[0];
+    transform[1] = mtx[1];
+    transform[2] = mtx[2];
+    transform[3] = mtx[3];
+    transform[4] = transform[5] = 0;
     current.x = current.y = 0;
     dashes[0] = 0; dashes[1] = DASH_INHERITED;
 
@@ -1619,7 +1622,7 @@ static void _InterpretPdf(FILE *in, struct pdfcontext *pc, EntityChar *ec) {
 }
 
 static SplineChar *pdf_InterpretSC(struct pdfcontext *pc,char *glyphname,
-	char *objnum, int *flags) {
+	char *objnum, int *flags, real mtx[4]) {
     int gn = strtol(objnum,NULL,10);
     EntityChar ec;
     FILE *glyph_stream;
@@ -1639,7 +1642,7 @@ return( NULL );
     ec.sc = sc = SplineCharCreate(2);
     sc->name = copy(glyphname);
 
-    _InterpretPdf(glyph_stream,pc,&ec);
+    _InterpretPdf(glyph_stream,pc,&ec,mtx);
     sc->width = ec.width;
     sc->layer_cnt = 1;
     SCAppendEntityLayers(sc,ec.splines,ImportParamsState());
@@ -1684,7 +1687,7 @@ return( NULL );
     ec.sc = &dummy;
     dummy.name = "Nameless glyph";
 
-    _InterpretPdf(glyph_stream,pc,&ec);
+    _InterpretPdf(glyph_stream,pc,&ec,NULL);
 
     fclose(glyph_stream);
 return( ec.splines );
@@ -1942,6 +1945,7 @@ return( temp );
 static SplineFont *pdf_loadtype3(struct pdfcontext *pc, int font_num) {
     char *enc, *cp, *fontmatrix, *name, *diffs;
     double emsize;
+    double mtx[4];
     SplineFont *sf;
     int flags = -1;
     int i;
@@ -1961,12 +1965,23 @@ static SplineFont *pdf_loadtype3(struct pdfcontext *pc, int font_num) {
   goto fail;
     if ( (fontmatrix=PSDictHasEntry(&pc->pdfdict,"FontMatrix"))==NULL )
   goto fail;
-    if ( sscanf(fontmatrix,"[%lg",&emsize)!=1 || emsize==0 )
+    if ( sscanf(fontmatrix,"[%lg %lg %lg %lg",&mtx[0],&mtx[1],&mtx[2],&mtx[3])!=4 || mtx[0]==0 )
   goto fail;
     if ( !pdf_getcharprocs(pc,cp))
   goto fail;
 
+    emsize = mtx[0];
+
     emsize = 1.0/emsize;
+    if (emsize < 1000) {
+      emsize = 1000;
+    }
+    mtx[0] = mtx[0]*emsize;
+    mtx[1] = mtx[1]*emsize;
+    mtx[2] = mtx[2]*emsize;
+    mtx[3] = mtx[3]*emsize;
+    LogError("FontMatrix: [%lg %lg %lg %lg]", mtx[0], mtx[1], mtx[2], mtx[3]);
+
     charprocdict = PSDictCopy(&pc->pdfdict);
 
     sf = SplineFontBlank(charprocdict->next);
@@ -1984,7 +1999,7 @@ static SplineFont *pdf_loadtype3(struct pdfcontext *pc, int font_num) {
 
     for ( i=0; i<charprocdict->next; ++i ) {
 	sf->glyphs[i] = pdf_InterpretSC(pc,charprocdict->keys[i],
-		charprocdict->values[i],&flags);
+		charprocdict->values[i],&flags,mtx);
 	if ( sf->glyphs[i]!=NULL ) {
 	    sf->glyphs[i]->orig_pos = i;
 	    sf->glyphs[i]->parent = sf;
