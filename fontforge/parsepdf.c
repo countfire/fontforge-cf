@@ -1756,7 +1756,7 @@ static void add_mapping(SplineFont *basesf, long *mappings, int *uvals, int nuni
     }
 }
 
-static void pdf_getcmap(struct pdfcontext *pc, SplineFont *basesf, int font_num) {
+static void pdf_getcmap(struct pdfcontext *pc, SplineFont *basesf, int font_num, int glyph_map[256]) {
     FILE *file;
     int i, j, gid, start, end, uni, cur=0, nuni, nhex, nchars, lo, *uvals;
     long *mappings = NULL;
@@ -1813,6 +1813,8 @@ return;
 		    }
 		    if (cur < mappings_length) {
 		        mappings[cur] = tmap;
+                        if (glyph_map != NULL)
+                          gid = glyph_map[gid];
 		        add_mapping(basesf, mappings, uvals, nuni, gid, pc->cmap_from_cid[font_num], cur);
 		        cur++;
 		    }
@@ -1841,6 +1843,8 @@ return;
 
 		    for (gid=start; gid<=end; gid++) {
 			mappings[cur] = uvals[0] = uni++;
+                        if (glyph_map != NULL)
+                          gid = glyph_map[gid];
 			add_mapping(basesf, mappings, uvals, 1, gid, pc->cmap_from_cid[font_num], cur);
 			cur++;
 		    }
@@ -1893,13 +1897,58 @@ return( false );
 return( ret );
 }
 
-static SplineFont *pdf_loadtype3(struct pdfcontext *pc) {
-    char *enc, *cp, *fontmatrix, *name;
+static int pdf_getencoding(struct pdfcontext *pc,char *charprocs) {
+    int cp = strtol(charprocs,NULL,10);
+    FILE *temp, *pdf = pc->pdf;
+    int ret;
+
+    /* An indirect reference? */
+    if ( cp!=0 ) {
+	if ( !pdf_findobject(pc,cp) )
+return( false );
+return( pdf_readdict(pc));
+    }
+    temp = GFileTmpfile();
+    if ( temp==NULL )
+return( false );
+    while ( *charprocs ) {
+	putc(*charprocs,temp);
+	++charprocs;
+    }
+    rewind(temp);
+    pc->pdf = temp;
+    ret = pdf_readdict(pc);
+    pc->pdf = pdf;
+    fclose(temp);
+return( ret );
+}
+
+static FILE *cf_str_to_stream(char *str) {
+    FILE *temp;
+    int ret;
+
+    temp = GFileTmpfile();
+    if ( temp==NULL )
+return( NULL );
+    while ( *str ) {
+	putc(*str,temp);
+	++str;
+    }
+    rewind(temp);
+return( temp );
+}
+
+
+static SplineFont *pdf_loadtype3(struct pdfcontext *pc, int font_num) {
+    char *enc, *cp, *fontmatrix, *name, *diffs;
     double emsize;
     SplineFont *sf;
     int flags = -1;
     int i;
     struct psdict *charprocdict;
+    struct psdict *fontdict;
+
+    fontdict = PSDictCopy(&pc->pdfdict);
 
     name=PSDictHasEntry(&pc->pdfdict,"Name");
     if ( name==NULL )
@@ -1946,12 +1995,63 @@ static SplineFont *pdf_loadtype3(struct pdfcontext *pc) {
     sf->glyphcnt = charprocdict->next;
     PSDictFree(charprocdict);
 
+    // decode the diffs to figure out the unicode
+    int start;
+    int ch;
+    int glyph_map[256];
+    // hack identity mapping to start
+    for (int i = 0; i < 256; i++)
+      glyph_map[i] = i;
+    char *glyph_name;
+    struct psdict pdfdict = pc->pdfdict;
+    pc->pdfdict = *fontdict;
+    enc = PSDictHasEntry(&pc->pdfdict,"Encoding");
+    pdf_getencoding(pc, enc);
+    if ( (diffs=PSDictHasEntry(&pc->pdfdict,"Differences"))!=NULL ) {
+      FILE *pdf = pc->pdf;
+      FILE *fdiffs = cf_str_to_stream(diffs);
+
+      while ( (ch=getc(fdiffs))>=0 ) {
+        if (pdf_space(ch))
+          continue;
+        if (ch == '[')
+          continue;
+        if (ch == ']')
+          break;
+        if (ch == '/') {
+          ungetc(ch, fdiffs);
+          pc->pdf = fdiffs;
+          glyph_name = pdf_getname(pc);
+          pc->pdf = pdf;
+          // we want to store orig_pos for the glyphname here
+          for (int i = 0; i < sf->glyphmax; i++) {
+            if (strcmp(glyph_name, sf->glyphs[i]->name) == 0) {
+              glyph_map[start] = sf->glyphs[i]->orig_pos;
+              LogError("Mapping: %i -> %i %s", start, glyph_map[start], glyph_name);
+            }
+          }
+          start++;
+        }
+        else {
+          ungetc(ch, fdiffs);
+          fscanf(fdiffs,"%d",&start);
+        }
+      }
+
+    }
+    pc->pdfdict = pdfdict;
+
     /* I'm going to ignore the encoding vector for now, and just return original */
     sf->map = EncMapFromEncoding(sf,FindOrMakeEncoding("Original"));
+
+    if ( pc->cmapobjs[font_num] != -1 )
+      pdf_getcmap(pc, sf, font_num, glyph_map);
+
 
 return( sf );
 
   fail:
+    PSDictFree(fontdict);
     free(name);
     LogError( _("Syntax errors while parsing Type3 font headers") );
 return( NULL );
@@ -1975,9 +2075,7 @@ static SplineFont *pdf_loadfont(struct pdfcontext *pc,int font_num) {
 return( NULL );
 
     if ( (pt=PSDictHasEntry(&pc->pdfdict,"Subtype"))!=NULL && strcmp(pt,"/Type3")==0 ) {
-        sf = pdf_loadtype3(pc);
-        if ( sf != NULL && pc->cmapobjs[font_num] != -1 )
-            pdf_getcmap(pc, sf, font_num);
+        sf = pdf_loadtype3(pc, font_num);
         return( sf );
     }
 
@@ -2030,7 +2128,7 @@ return( NULL );
     /* Don't attempt to parse CMaps for Type 1 fonts: they already have glyph names */
     /* which are usually more meaningful */
     if (pc->cmapobjs[font_num] != -1 && type > 1)
-	pdf_getcmap(pc, sf, font_num);
+	pdf_getcmap(pc, sf, font_num, NULL);
 return( sf );
 
   fail:
